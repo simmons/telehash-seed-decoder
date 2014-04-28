@@ -161,6 +161,26 @@ function decodeKey(li, key64, providedFingerprint) {
     }
 }
 
+function calculateHashname(li, parts) {
+    var work = "";
+    var hash = null;
+    Object.keys(parts).sort().forEach(function(id){
+        if (hash == null) {
+            hash = sha256(id);
+            work += 'hash = sha256("'+id+'");'+"\n"+'// '+array_to_hex_string(hash)+"\n";
+        } else {
+            hash = sha256(byteArrayToString(hash) + id);
+            work += 'hash = sha256(hash + "'+id+'");'+"\n"+'// '+array_to_hex_string(hash)+"\n";
+        }
+        hash = sha256(byteArrayToString(hash) + parts[id]);
+        work += 'hash = sha256(hash + "'+parts[id]+'");'+"\n"+'// '+array_to_hex_string(hash)+"\n";
+    });
+    var calcHashname = array_to_hex_string(hash);
+    li.append("<p><pre>"+work+"</pre></p>");
+
+    return calcHashname;
+}
+
 function decode() {
     errorClear();
     var output = $("#output");
@@ -187,6 +207,8 @@ function decode() {
         var obj = jQuery.parseJSON(text);
 
         for (var hashname in obj) {
+            var updatedFingerprints = false;
+            var goodParts = {};
             var li = $("<li></li>");
             ul.append(li);
             li.append($("<h4>hashname <tt>"+hashname+"</tt></h4>"));
@@ -207,6 +229,7 @@ function decode() {
                 continue;
             }
             for (var csid in parts) {
+                goodParts[csid] = parts[csid];
                 if (! keys[csid]) {
                     error("Cipher set id "+csid+" exists in parts, but not keys, in seed: "+hashname);
                 }
@@ -217,28 +240,28 @@ function decode() {
                     continue;
                 }
                 if (csid == '2a') {
-                    decodeKey(li, keys[csid], parts[csid]);
+                    var fingerprint = decodeKey(li, keys[csid], parts[csid]);
+                    if (fingerprint && fingerprint != parts[csid]) {
+                        goodParts[csid] = fingerprint;
+                        updatedFingerprints = true;
+                    }
                 }
             }
 
-            var work = "";
-            var hash = null;
-            Object.keys(parts).sort().forEach(function(id){
-                if (hash == null) {
-                    hash = sha256(id);
-                    work += 'hash = sha256("'+id+'");'+"\n"+'// '+array_to_hex_string(hash)+"\n";
-                } else {
-                    hash = sha256(byteArrayToString(hash) + id);
-                    work += 'hash = sha256(hash + "'+id+'");'+"\n"+'// '+array_to_hex_string(hash)+"\n";
-                }
-                hash = sha256(byteArrayToString(hash) + parts[id]);
-                work += 'hash = sha256(hash + "'+parts[id]+'");'+"\n"+'// '+array_to_hex_string(hash)+"\n";
-            });
-            var calcHashname = array_to_hex_string(hash);
-            li.append("<p>Hashname calculation work, based on the provided \"parts\": <pre>"+work+"</pre></p>");
-            li.append("<p>Calculated hashname: <b>"+calcHashname+"</b></p>");
-            if (hashname != calcHashname) {
+            li.append("<p>Hashname calculation work, based on the provided \"parts\":</p>");
+            var calculatedHashname = calculateHashname(li, parts);
+            li.append("<p>Calculated hashname: <b>"+calculatedHashname+"</b></p>");
+            if (hashname != calculatedHashname) {
                 li.append('<p class="error">Calculated hashname does not match the provided hashname!</p>');
+            }
+
+            if (updatedFingerprints) {
+                li.append("<p>Hashname calculation work, based on the <b><em>correct fingerprints</em></b>:</p>");
+                var calculatedHashname = calculateHashname(li, goodParts);
+                li.append("<p>Calculated hashname: <b>"+calculatedHashname+"</b></p>");
+                if (hashname != calculatedHashname) {
+                    li.append('<p class="error">Calculated hashname (based on correct fingerprints) does not match the provided hashname!</p>');
+                }
             }
         }
     } catch (e) {

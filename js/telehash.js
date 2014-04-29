@@ -29,9 +29,9 @@ function error(msg) {
 }
 
 //
-// Parse an RSA public key assuming PKCS#8 (SubjectPublicKeyInfo) format
+// Parse an RSA public key assuming X.509 SubjectPublicKeyInfo format
 //
-function parsePkcs8(asn1) {
+function parseSPKI(asn1) {
     try {
         if (asn1.typeName() == "SEQUENCE" &&
             asn1.sub[0].typeName() == "SEQUENCE" &&
@@ -73,20 +73,46 @@ function asn1ToBytes(asn1) {
     return asn1.stream.enc.slice(asn1.stream.pos, asn1.stream.pos+asn1.header+asn1.length);
 }
 
-function convertPkcs8ToPkcs1v21(asn1) {
+function encodeDERLength(length) {
+    if (length > 127) {
+        if (length > 65535) {
+            throw new Error("unsupported DER length");
+        }
+        encodedLength = [ 0x82, ((length&0xFF00)>>8), (length&0xFF) ];
+    } else {
+        encodedLength = [ length ];
+    }
+    return encodedLength;
+}
+
+function convertSPKIToPkcs1v21(asn1) {
     var encodedModulus = asn1ToBytes(asn1.sub[1].sub[0].sub[0]);
     var encodedExponent = asn1ToBytes(asn1.sub[1].sub[0].sub[1]);
     var sequenceLength = encodedModulus.length + encodedExponent.length;
-    var encodedSequenceLength = "";
-    if (sequenceLength > 127) {
-        if (sequenceLength > 65535) {
-            throw new Error("unsupported length");
-        }
-        encodedSequenceLength = [ 0x82, ((sequenceLength&0xFF00)>>8), (sequenceLength&0xFF) ];
-    } else {
-        encodedSequenceLength = [ sequenceLength ];
-    }
+    var encodedSequenceLength = encodeDERLength(sequenceLength);
     return [0x30].concat(encodedSequenceLength, encodedModulus, encodedExponent);
+}
+
+function convertPkcs1v21ToSPKI(asn1) {
+    // wrap in BIT STRING
+    var pkcs1Key = asn1ToBytes(asn1);
+    var bitString = [0x03].concat(
+        encodeDERLength(1+pkcs1Key.length),
+        [0x00],
+        pkcs1Key
+    );
+    // form SEQUENCE{rsaAlgorithm,NULL}
+    var algorithmSequence = [ 
+        0x30,0x0D,0x06,0x09,0x2A,0x86,0x48,0x86,
+        0xF7,0x0D,0x01,0x01,0x01,0x05,0x00
+    ];
+    // combine into outer SEQUENCE
+    var sequence = [0x30].concat(
+        encodeDERLength(algorithmSequence.length+bitString.length),
+        algorithmSequence,
+        bitString
+    );
+    return sequence;
 }
 
 function sha256(data) {
@@ -105,7 +131,6 @@ function sha256hex(data) {
     return digest_hex;
 }
 
-
 function decodeKey(li, key64, providedFingerprint) {
     try {
         var key = Base64.decode(key64);
@@ -117,34 +142,40 @@ function decodeKey(li, key64, providedFingerprint) {
         var parsedKey;
         var correctKey;
         var fingerprint;
-        if ((parsedKey = parsePkcs8(asn1)) != null) {
-            li.append("<p>Public key is in <b>PKCS#8 (SubjectPublicKeyInfo)</b> format, and contains the following values:</p>");
+        if ((parsedKey = parseSPKI(asn1)) != null) {
+            li.append("<p>Public key is in <b>X.509 SubjectPublicKeyInfo</b> format, and contains the following values:</p>");
             li.append("<p><pre>Modulus: "+parsedKey[0]+"\nExponent: "+parsedKey[1]+"</pre></p>");
-            li.append('<p class="error">The public key should be provided in PKCS#1 v2.1 encoding, as follows:</p>');
-            correctKey = convertPkcs8ToPkcs1v21(asn1);
-            li.append("<p><pre>"+base64encode(correctKey)+"</pre></p>");
+
+            correctKey = key;
             fingerprint = sha256hex(correctKey);
-            li.append("<p>Calculated public key fingerprint (PKCS#1 v2.1 encoding): <tt><b>"+fingerprint+"</b></tt></p>");
+            li.append("<p>Calculated public key fingerprint (X.509 SPKI encoding): <tt><b>"+fingerprint+"</b></tt></p>");
+
             if (providedFingerprint) {
-                var badFingerprint = sha256hex(key);
-                var goodFingerprint = fingerprint;
-                if (providedFingerprint != goodFingerprint) {
-                    if (providedFingerprint == badFingerprint) {
-                        li.append('<p class="error">The seeds.json "part" for this key is not the correct fingerprint!  (It is actually a fingerprint of the PKCS#8/SPKI encoding!)</p>');
-                    } else {
-                        li.append('<p class="error">The seeds.json "part" for this key is not the correct fingerprint!</p>');
-                    }
+                if (providedFingerprint != fingerprint) {
+                    li.append('<p class="error">The seeds.json "part" for this key is not the correct fingerprint!</p>');
                 }
             }
         } else if ((parsedKey = parsePkcs1v21(asn1)) != null) {
             li.append("<p>Public key is in <b>PKCS#1 v2.1</b> format, and contains the following values:</p>");
             li.append("<p><pre>Modulus: "+parsedKey[0]+"\nExponent: "+parsedKey[1]+"</pre></p>");
-            correctKey = key;
+
+            // warn about incorrect format
+            li.append('<p class="error">The public key should be provided in X.509 SubjectPublicKeyInfo encoding, as follows:</p>');
+            correctKey = convertPkcs1v21ToSPKI(asn1);
+            li.append("<p><pre>"+base64encode(correctKey)+"</pre></p>");
+
             fingerprint = sha256hex(correctKey);
-            li.append("<p>Calculated public key fingerprint (PKCS#1 v2.1 encoding): <tt><b>"+fingerprint+"</b></tt></p>");
+            li.append("<p>Calculated public key fingerprint (X.509 SPKI encoding): <tt><b>"+fingerprint+"</b></tt></p>");
+
             if (providedFingerprint) {
-                if (providedFingerprint != fingerprint) {
-                    li.append('<p class="error">The seeds.json "part" for this key is not the correct fingerprint!</p>');
+                var badFingerprint = sha256hex(key);
+                var goodFingerprint = fingerprint;
+                if (providedFingerprint != goodFingerprint) {
+                    if (providedFingerprint == badFingerprint) {
+                        li.append('<p class="error">The seeds.json "part" for this key is not the correct fingerprint!  (It is actually a fingerprint of the PKCS#1 v2.1 encoding!)</p>');
+                    } else {
+                        li.append('<p class="error">The seeds.json "part" for this key is not the correct fingerprint!</p>');
+                    }
                 }
             }
         } else {
